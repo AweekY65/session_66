@@ -1,0 +1,10 @@
+[project]
+name = "pyramid-tool"
+version = "0.1.0"
+description = "Local image pyramid and tile generator (no external services)"
+requires-python = ">=3.9"
+dependencies = ["numpy", "Pillow"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
