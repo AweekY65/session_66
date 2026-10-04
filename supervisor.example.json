@@ -1,0 +1,27 @@
+{
+  "state_dir": ".svstate",
+  "log_dir": ".svstate/logs",
+  "services": [
+    {
+      "name": "worker",
+      "command": "./target/debug/testprog",
+      "args": ["run"],
+      "restart": "always",
+      "max_restarts": 3,
+      "backoff_initial_ms": 500,
+      "backoff_max_ms": 5000,
+      "stop_timeout_ms": 2000,
+      "log_max_bytes": 1048576,
+      "log_keep": 3
+    },
+    {
+      "name": "flaky",
+      "command": "./target/debug/testprog",
+      "args": ["exit", "1"],
+      "restart": "on-failure",
+      "max_restarts": 2,
+      "backoff_initial_ms": 200,
+      "backoff_max_ms": 1000
+    }
+  ]
+}

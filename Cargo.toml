@@ -1,0 +1,18 @@
+[package]
+name = "supervisor"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "supervisor"
+path = "src/lib.rs"
+
+[[bin]]
+name = "supervisor"
+path = "src/main.rs"
+
+[[bin]]
+name = "testprog"
+path = "src/bin/testprog.rs"
+
+[dependencies]
