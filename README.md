@@ -1,82 +1,101 @@
-# pyramid_tool — 本地图像金字塔与切片生成工具
+# local-supervisor
 
-一个纯本地的图像金字塔（image pyramid）与 tile 切片工具。所有输入图片、
-缩放层、tile、manifest 和缓存**只存储在本地文件或内存中**，不依赖地图
-服务器、CDN、云存储或任何外部服务。
+一个纯本地进程 Supervisor：根据本地 TOML 配置启动、停止和守护多个子进程。
+所有服务配置、PID 状态、重启记录、日志和运行元数据只保存在**本地文件或内存**中，
+不依赖 systemd、Docker、Kubernetes、数据库或任何外部服务。仅使用 Python 标准库（>= 3.11）。
 
-## 安装与依赖
-
-- Python >= 3.9，依赖 `numpy`、`Pillow`（测试需要 `pytest`）
-- 支持读取本地 PNG / JPEG（`.png` / `.jpg` / `.jpeg`），统一转换为 RGB
-
-## 使用方法
+## 快速开始
 
 ```bash
-python -m pyramid_tool build <图片路径> -o <输出目录> \
-    [--tile-size 256] [--min-size 256] \
-    [--resample nearest|bilinear] [--edge-mode pad|crop]
+python3 -m supervisor run examples/supervisor.toml     # 前台运行（Ctrl-C 优雅退出）
+python3 -m supervisor status examples/supervisor.toml  # 查看磁盘上的状态
+python3 -m supervisor stop examples/supervisor.toml    # 向运行中的 supervisor 发 SIGTERM
+python3 -m pytest                                      # 运行全部自动化测试
 ```
 
-输出目录结构：
+## 配置
+
+```toml
+[supervisor]
+state_dir = ".sv"          # 状态、元数据与日志的根目录（相对配置文件所在目录）
+
+[[service]]
+name = "worker"
+command = ["python3", "worker.py"]
+restart = "on-failure"     # never | on-failure | always
+max_restarts = 5           # 最大连续重启次数，超过后进入 failed
+backoff_initial = 0.5      # 首次重启等待秒数
+backoff_factor = 2.0       # 指数退避因子
+backoff_max = 30.0         # 退避上限（秒）
+backoff_reset_after = 10.0 # 稳定运行超过该时长后重置连续重启计数
+stop_signal = "TERM"       # 优雅停止首先发送的信号
+stop_timeout = 5.0         # 超过该时长仍未退出则 SIGKILL
+log_max_bytes = 1048576    # 单个日志文件最大字节数
+log_backups = 3            # 保留的轮转文件个数
+```
+
+## 状态机
+
+每个服务是一个独立状态机，状态持久化到 `<state_dir>/<name>.state.json`（原子写入：临时文件 + rename）：
 
 ```
-out/
-  manifest.json
-  tiles/<level>/<x>_<y>.png
+STOPPED -> STARTING -> RUNNING --+--> EXITED   正常退出且策略不重启
+                                 +--> FAILED   非零退出(never/on-failure) 或超过 max_restarts
+                                 +--> BACKOFF -> STARTING   按策略重启，先指数退避
+                                 +--> STOPPING -> STOPPED   优雅停止（超时后 SIGKILL）
 ```
 
-## 层级算法
+每次状态迁移都会记录：`pid`、`pgid`、`started_at`、`exited_at`、`exit_code`、
+`consecutive_restarts` 以及完整的 `restarts` 历史（序号、时间、退避时长、上次退出码）。
 
-- level 0 为原图；每向上一层，宽和高分别做 `ceil(d / 2)`（最小 1 px）。
-- 当 `max(width, height) <= min_size` 时停止生成新层。
-- 例：773x501、`min_size=100` → 773x501 → 387x251 → 194x126 → 97x63，共 4 层。
+## 重启策略与指数退避
 
-## 缩放方式
+- `never`：退出后不重启；`on-failure`：仅退出码非零时重启；`always`：总是重启。
+- 第 n 次连续重启的等待时间为 `min(backoff_initial * backoff_factor^(n-1), backoff_max)`，
+  频繁崩溃的进程不会形成无间隔重启循环。
+- 进程稳定运行超过 `backoff_reset_after` 秒后，连续重启计数清零，退避重新开始。
 
-- `nearest`：最近邻；`bilinear`：双线性。
-- 两者均采用 align-centers 约定：`src = (dst + 0.5) * (src_len / dst_len) - 0.5`，
-  基于 numpy float64 实现并四舍五入到 uint8，**相同输入必得到位级一致的结果**，
-  不随 Pillow 版本变化。
+## 信号处理与优雅关闭
 
-## 坐标与边缘规则
+- 子进程使用 `start_new_session=True` 放入独立进程组，停止时向**整个进程组**发送
+  `stop_signal`（默认 SIGTERM），等待 `stop_timeout` 秒；仍未退出则发送 SIGKILL 强制结束。
+- supervisor 自身收到 SIGINT/SIGTERM 时，对所有服务并行执行上述优雅停止后再退出。
 
-- tile 坐标 `(x, y)` 为 0 起始的列、行号（原点在左上角），覆盖像素范围
-  `[x*tile_size, (x+1)*tile_size) × [y*tile_size, (y+1)*tile_size)`。
-- 每层 tile 数为 `ceil(w/tile_size) × ceil(h/tile_size)`。
-- 边缘不足完整 tile 的区域有两种明确规则（`--edge-mode`）：
-  - `pad`（默认）：所有 tile 均为完整 `tile_size × tile_size`，图外区域
-    以 `pad_color`（默认黑色）填充；manifest 中的 `content_width/height`
-    记录有效内容尺寸。
-  - `crop`：边缘 tile 按实际大小裁剪存储，manifest 中的 `width/height`
-    即为真实尺寸。
+## 日志策略
 
-## manifest.json
+- 每个服务的 stdout/stderr 由独立线程捕获，加上 `[时间戳 流名]` 前缀写入
+  `<state_dir>/logs/<name>.log`。
+- 按大小轮转：`name.log` → `name.log.1` → …→ `name.log.N`，超出 `log_backups` 的最旧文件被删除。
+- 所有写入经单把锁串行化，且**只在完整记录（整行）边界处轮转**——
+  已写入的完整记录在轮转过程中不会被截断或丢失（轮转测试逐行校验了记录完整性）。
 
-记录校验与增量重建所需的全部信息：
+## 重启恢复（遗留状态识别）
 
-- `source`：源图路径、尺寸、文件内容的 SHA-256。
-- `config`：tile_size、min_size、resample、edge_mode、pad_color。
-- `levels[]`：每层的 `level`、`width`、`height`、`tiles_x/y`，以及每个
-  tile 的 `x`、`y`、存储尺寸 `width/height`、有效内容尺寸
-  `content_width/height`、相对路径 `file` 和文件内容的 `sha256`。
+supervisor 重启后会读取磁盘状态并与现实核对：
 
-## 增量重建与原子写入
+- 状态文件中的 PID 已不存在 → 标记为 `stopped`，**不会**误认为旧 PID 仍是受管进程。
+- PID 仍存在但 `/proc/<pid>/stat` 的 starttime 与记录不一致（PID 被回收复用）→
+  同样判定为失效，且**不会**去动那个无关进程。
+- PID 存活且 starttime 一致 → 判定为遗留的受管子进程，重新接管（adopt）：
+  恢复 `running` 状态、继续监控其存活，并可对其执行优雅停止。
 
-- 重建时先比对源图哈希与配置：均一致才进入增量模式。
-- 增量模式下逐个校验 manifest 中记录的 tile 文件哈希；**未变化的输入
-  不会重写任何 tile**；缺失或损坏（哈希不符）的 tile 会被单独重新生成。
-- 配置或源图变化时自动全量重建。
-- 所有文件（tile 与 manifest）都通过「同目录临时文件 + `os.replace`」
-  原子写入；manifest 最后提交，因此生成中断绝不会留下被 manifest 误认
-  为有效的半文件。下次构建开始时还会清理上次中断残留的 `*.tmp-*` 文件。
+## 目录结构
 
-## 运行测试
+```
+<state_dir>/
+  supervisor.json        # supervisor 元数据（自身 pid、版本、启动时间）
+  <name>.state.json      # 每个服务的持久化状态
+  logs/<name>.log[.N]    # 轮转日志
+```
+
+## 测试
 
 ```bash
-python -m pytest -v
+python3 -m pytest -v
 ```
 
-测试在终端内完成并输出校验结果，不会打开任何图片窗口。覆盖场景：
-奇数尺寸层级、边缘 tile（pad/crop）、nearest/bilinear 正确性与确定性、
-增量构建（无变化零写入）、tile 损坏/缺失后的定点重生成、中途失败
-（manifest 不提交、无残留临时文件、可恢复）以及配置变化触发全量重建。
+测试程序位于 `tests/programs/`：`normal_exit.py`（正常退出）、`crash.py`（崩溃 /
+崩溃 N 次后稳定）、`stay_up.py`（响应 SIGTERM）、`ignore_term.py`（忽略 SIGTERM，
+只能 SIGKILL）、`log_spam.py`（大量 stdout/stderr 日志）。覆盖：三种重启策略、
+指数退避及上限、最大连续重启次数、优雅停止、超时强制杀死、stdout/stderr 捕获、
+日志轮转完整性与备份上限、失效 PID / PID 复用识别、遗留进程接管。全部测试在终端内完成。

@@ -1,0 +1,15 @@
+[supervisor]
+state_dir = ".sv"
+
+[[service]]
+name = "ticker"
+command = ["python3", "examples/ticker.py"]
+restart = "always"
+max_restarts = 5
+backoff_initial = 0.5
+backoff_factor = 2.0
+backoff_max = 10.0
+stop_signal = "TERM"
+stop_timeout = 3.0
+log_max_bytes = 65536
+log_backups = 3

@@ -1,10 +1,9 @@
 [project]
-name = "pyramid-tool"
+name = "local-supervisor"
 version = "0.1.0"
-description = "Local image pyramid and tile generator (no external services)"
-requires-python = ">=3.9"
-dependencies = ["numpy", "Pillow"]
+description = "Local file-based process supervisor (no systemd/Docker/K8s/DB)"
+requires-python = ">=3.11"
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
 testpaths = ["tests"]
+addopts = "-q"
